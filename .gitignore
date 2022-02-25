@@ -1,0 +1,8 @@
+.ctagsignore
+tags
+*__pycache__*
+*.vscode*
+*.ipynb_checkpoints*
+plots/*
+*.pdf
+data/*
