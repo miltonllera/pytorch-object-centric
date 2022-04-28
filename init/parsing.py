@@ -128,9 +128,26 @@ def create_layer_norm(input_size, args, kwargs):
     return nn.LayerNorm(normalized_shape, *args[1:], **kwargs)
 
 
+def create_group_norm(input_size, args, kwargs):
+    return nn.GroupNorm(args[0], input_size[0], **kwargs)
+
+
 def create_conv(input_size, args, kwargs):
     layer = nn.Conv2d(input_size[0], *args, **kwargs)
     output_size = conv2d_out_shape(input_size, *args)
+    return layer, output_size
+
+
+def create_pixel_shuffle(input_size, args, kwargs):
+    upscale_factor = args[0]
+    n_channels, height, width = input_size[-3:]
+
+    layer = nn.PixelShuffle(upscale_factor)
+    output_size = [n_channels // upscale_factor ** 2,
+                   height * upscale_factor,
+                   width * upscale_factor]
+
+    output_size = list(output_size[:-3]) + output_size
     return layer, output_size
 
 
@@ -183,7 +200,8 @@ class Permute(nn.Module):
         return inputs.permute(self.new_order)
 
     def __repr__(self):
-        return 'Permute({})'.format(*self.new_order)
+        template = 'Permute({})'.format(','.join(['{}'] * len(self.new_order)))
+        return template.format(*self.new_order)
 
 
 def create_permute(input_size, args, kwargs):
@@ -210,6 +228,8 @@ def parse_specs(input_size, layer_defs):
             layer = create_batch_norm(args[0], output_size, args[1:], kwargs)
         elif layer_type == 'layer_norm':
             layer = create_layer_norm(output_size, args, kwargs)
+        elif layer_type == 'group_norm':
+            layer = create_group_norm(output_size, args, kwargs)
         elif layer_type == 'pool':
             layer, output_size = create_pool(output_size, args, kwargs)
         elif layer_type == 'dropout':
@@ -222,7 +242,7 @@ def parse_specs(input_size, layer_defs):
             output_size = args[1]
         elif layer_type == 'upsample':
             layer = nn.UpsamplingBilinear2d(*args)
-            output_size = output_size[0], *args[0]
+            output_size = (output_size[0], *args[0])
         elif layer_type == 'spatbroad':
             layer, output_size = create_spatbroad(output_size, args, kwargs)
         elif layer_type == 'posemb2d':
@@ -231,6 +251,8 @@ def parse_specs(input_size, layer_defs):
             layer, output_size = create_posconcat(output_size, args, kwargs)
         elif layer_type == 'permute':
             layer, output_size = create_permute(output_size, args, kwargs)
+        elif layer_type == 'pixel_shuffle':
+            layer, output_size = create_pixel_shuffle(output_size, args, kwargs)
         else:
             layer = get_nonlinearity(layer_type)(*args, **kwargs)
 

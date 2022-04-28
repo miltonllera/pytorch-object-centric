@@ -3,6 +3,8 @@ Wrappers for the different kinds of training settings we want to use
 """
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from torch.utils.data.dataset import Dataset
 
 
@@ -54,9 +56,26 @@ class Wrapper(Dataset):
         return self.base_dataset.target_transform
 
 
+
+def feature_set(dataset):
+    n_values = [len(v) for v in dataset.unique_values.values()]
+
+    sets =  []
+
+    for j in range(dataset.n_factors):
+        if dataset.categorical[j]:
+            v = torch.from_numpy(dataset.factor_classes[..., j])
+            one_hot = F.one_hot(v.to(dtype=torch.long), n_values[j]).numpy()
+        else:
+            one_hot = (dataset.factor_classes[..., j] / n_values[j])[..., None]
+
+        sets.append(one_hot)
+
+    return np.concatenate(sets, axis=-1)
+
+
 class Supervised(Wrapper):
-    def __init__(self, base_dataset, dim=None,
-                 pred_type='reg', norm_lats=True):
+    def __init__(self, base_dataset, dim=None, pred_type='reg', norm_lats=True):
         super().__init__(base_dataset)
         self.pred_type = pred_type
         self.dim = dim
@@ -79,19 +98,21 @@ class Supervised(Wrapper):
 
             self.standarize = standarize
 
+        if pred_type == 'set':
+            self.sets = feature_set(self.base_dataset)
+
     def __getitem__(self, idx):
         img = self.transform(self.images[idx])
 
         if self.pred_type == 'class':
             target = self.factor_classes[idx]
+        elif self.pred_type == 'set':
+            target = self.sets[idx]
         else:
             target = self.factor_values[idx]
 
         if self.target_transform:
             target = self.target_transform(target)
-
-        if self.norm_lats:
-            target = self.standarize(target).astype(np.float32)
 
         if self.dim is not None:
             target = target[self.dim]
@@ -108,6 +129,8 @@ class Supervised(Wrapper):
                 return self.factor_sizes[self.dim]
             else:
                 return self.factor_sizes
+        elif self.pred_type == 'set':
+            return self.sets.shape[-1]
         if self.dim is not None:
             return 1
         return self.n_factors
@@ -128,17 +151,3 @@ class Unsupervised(Wrapper):
 
     def __str__(self):
         return 'Unsupervised{}'.format(str(self.base_dataset))
-
-
-class Reconstruction(Wrapper):
-    def __getitem__(self, idx):
-        img = self.transform(self.images[idx])
-        target = self.factor_values[idx]
-
-        if self.target_transform:
-            target = self.target_transform(target)
-
-        return target, img
-
-    def __str__(self):
-        return 'Reconstruction{}'.format(str(self.base_dataset))

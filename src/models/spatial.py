@@ -48,6 +48,22 @@ class PositionConcat(nn.Module):
                                                            self.width)
 
 
+class PositionEmbedding1D(nn.Module):
+    def __init__(self, max_len, d_model):
+        super().__init__()
+        self.pe = nn.Parameter(torch.zeros(1, max_len, d_model),
+                               requires_grad=True)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.trunc_normal_(self.pe)
+
+    def forward(self, input, start_pos=0):
+        T = input.shape[1]
+        return input + self.pe[:, start_pos:start_pos + T]
+
+
 class PositionEmbedding2D(nn.Module):
     def __init__(self, n_channels, height, width=None, embed='cardinal'):
         super().__init__()
@@ -69,7 +85,7 @@ class PositionEmbedding2D(nn.Module):
 
         linear_init(linear, activation=None)
 
-        self.grid = grid.T
+        self.grid = grid.transpose(2, 0)
         self.projection = linear
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:

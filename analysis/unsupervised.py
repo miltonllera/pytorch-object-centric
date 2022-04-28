@@ -16,33 +16,31 @@ from init.analysis import analysis, infer, model_score, generate_recons, \
                           plot_recons, compute_slot_masks, plot_masks, \
                           learning_curve_plot
 
-from init.models import load_slot_ae
+from init.models import load_model
 
 
 an = Experiment(name='analysis', ingredients=[analysis, dataset, training])
 
 
-an.add_config(scores=True, recons=True, learning_curve=True,
-              root_folder='data/results', no_cuda=False)
+an.add_config(scores=True, recons=True, learning_curve=True, no_cuda=False)
 
 # Configs to run only one analysis
-an.add_named_config('learning', plot_recons=False, score_model=False)
-an.add_named_config('score', plot_recons=False, plot_learning_curve=False)
-an.add_named_config('recons', score_model=False, plot_learning_curve=False)
+an.add_named_config('learning', recons=False, socres=False)
+an.add_named_config('score', scores=False, learning_curve=False)
+an.add_named_config('recons', scores=False, learning_curve=False)
 
 # Run all but X
-an.add_named_config('noscore', score_model=False)
-an.add_named_config('norecons', plot_recons=False)
+an.add_named_config('noscore', scores=False)
+an.add_named_config('norecons', recons=False)
 
 # Run either performance or latent representation plots
 an.add_named_config('perfm', compute_disent=False, plot_latent_rep=False)
 
 training.add_named_config('recons_mse', metrics=[mse_recons])
-training.add_named_config('recons_bern', metrics=[bern_recons])
 
 
 def is_generative(setting):
-    return setting in ['composition', 'unsupervised', 'recons']
+    return setting in ['unsupervised', 'recons']
 
 
 @an.capture
@@ -58,16 +56,8 @@ def set_seed_and_device(seed, no_cuda):
     return device
 
 
-def load_model(setting, dataset, model_folder, device):
-    if setting == 'unsupervised':
-        model = load_slot_ae(dataset.img_size, model_folder)
-    else:
-        raise ValueError()
-    return model.to(device=device)
-
-
 @an.automain
-def main(model_id, exp_folder, scores, learning_curve, recons, root_folder):
+def main(model_id, exp_folder, scores, learning_curve, recons):
 
     print('Running analysis for model {}.'.format(model_id))
 
@@ -93,7 +83,7 @@ def main(model_id, exp_folder, scores, learning_curve, recons, root_folder):
         loss = configs['training']['loss']['name']
 
     # Create results folder
-    results_folder = path.join(root_folder, setting, str(model_id))
+    results_folder = model_folder.replace('sims', 'results')
     os.makedirs(results_folder, exist_ok=True)
 
     if learning_curve:
@@ -112,7 +102,7 @@ def main(model_id, exp_folder, scores, learning_curve, recons, root_folder):
 
     # model = load_composer(model_folder, model_id, device)
     dataset = get_lazyloader(dataset, condition, variant, modifiers)
-    model = load_model(setting, dataset, model_folder, device)
+    model = load_model(dataset.img_size, model_folder).to(device=device)
 
     print('Done.')
 
@@ -176,11 +166,11 @@ def main(model_id, exp_folder, scores, learning_curve, recons, root_folder):
         if test_data is not None:
             print('Generating reconstruction examples for test data...')
 
-            outputs = generate_recons(model, test_data, loss=loss)
-            test_recons, test_masks = outputs[:2], outputs[::2]
+            test_recons = generate_recons(model, test_data, loss=loss)[:2]
+            test_masks = compute_slot_masks(model, test_data)[:2]
 
-            test_recons_fig = recons(test_recons)
-            test_mask_fig = recons(test_masks)
+            test_recons_fig = plot_recons(test_recons)
+            test_mask_fig = plot_masks(test_masks)
 
             test_recons_fig.savefig(path.join(results_folder,
                                               'test_recons.png'),

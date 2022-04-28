@@ -13,7 +13,9 @@ class Tetrominoes(Dataset):
     """
     files = {"full": "data/raw/tetrominoes/all_tetrominoes.npz"}
 
-    factors = {"shape", "color", "x", "y", "visibility"}
+    factors = ("shape", "color", "x", "y", "visibility")
+
+    n_factors = 4
 
     categorical = np.array([1, 1, 0, 0, 1])
 
@@ -33,6 +35,10 @@ class Tetrominoes(Dataset):
                                         26, 27, 28, 29]),
                      'visibility': np.array([1.])}
 
+    @property
+    def factor_classes(self):
+        return self.factor_values
+
     def __init__(self, images, masks, factor_values, target_transform=None):
         self.images = images
         self.masks = masks
@@ -48,13 +54,16 @@ class Tetrominoes(Dataset):
     def __getitem__(self, idx):
         return (self.transform(self.images[idx]),
                 self.factor_values[idx],
-                self.masks[idx])
+                self.factor_classes[idx])
 
     def __len__(self):
         return len(self.images)
 
     def __str__(self):
         return 'Tetrominoes'
+
+
+# def make_set(features):
 
 
 def load_raw(path):

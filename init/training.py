@@ -13,18 +13,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
+import ignite.metrics as M
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import random_split
-
-import ignite.metrics as M
-from ignite.engine import Events
-from ignite.handlers import LRScheduler
-from ignite.handlers.param_scheduler import create_lr_scheduler_with_warmup
-
 from sacred import Ingredient
+from ignite.engine import _prepare_batch, Engine
 
 import src.training.loss as L
-from src.training.scheduler import SmoothStepLR, WarmupAndDecay
+from src.training.scheduler import WarmupLR, ExponentialLR
 from src.training.handlers import ModelCheckpoint
 
 
@@ -39,7 +35,10 @@ mse_recons  = {'name': 'recons_nll', 'params': {'loss': 'mse'}}
 bxent_loss  = {'name': 'bxent', 'params': {}}
 xent_loss   = {'name': 'xent', 'params': {}}
 mse_loss    = {'name': 'mse', 'params': {}}
+slate_loss  = {'name': 'slate', 'params': {'loss': 'mse'}}
+token_xent  = {'name': 'token_xent', 'params': {}}
 accuracy    = {'name': 'acc', 'params': {'output_transform': binary_output}}
+hungarian_loss = {'name': 'hunloss', 'params': {}}
 
 
 training = Ingredient('training')
@@ -85,6 +84,36 @@ def init_loader(dataset, batch_size, train_val_split=0.0, **loader_kwargs):
 
 
 @training.capture
+def create_supervised_trainer(model, optimizer, loss_fn, device=None,
+                              non_blocking=False, grad_norm=None,
+                              norm_type='inf',
+                              prepare_batch=_prepare_batch,
+                              output_transform=None) -> Engine:
+
+    device_type = device.type if isinstance(device, torch.device) else device
+    if output_transform is None:
+        output_transform = lambda x, y, y_pred, loss: loss.item()
+
+    def _update(engine, batch):
+        model.train()
+        x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
+        optimizer.zero_grad()
+
+        y_pred = model(x)
+        loss = loss_fn(y_pred, y)
+        loss.backward()
+
+        if grad_norm is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_norm, norm_type)
+
+        optimizer.step()
+
+        return output_transform(x, y, y_pred, loss)
+
+    return Engine(_update)
+
+
+@training.capture
 def get_n_epochs(dataset_loader, n_iters, batch_size):
     data = dataset_loader.dataset
     total_instances = len(data)
@@ -105,6 +134,12 @@ def init_loss(loss):
         return nn.CrossEntropyLoss(**params)
     elif loss_fn == 'mse':
         return nn.MSELoss(**params)
+    elif loss_fn == 'token_xent':
+        return L.ImageTokenLoss(**params)
+    elif loss_fn == 'slate':
+        return L.SLATELoss()
+    elif loss_fn == 'hunloss':
+        return L.HungarianLoss()
     else:
         raise ValueError('Unknown loss function {}'.format(loss_fn))
 
@@ -130,15 +165,54 @@ def get_metric(metric):
         return M.Loss(nn.BCEWithLogitsLoss(**params))
     elif name == 'xent':
         return M.Loss(nn.CrossEntropyLoss(**params))
+    elif name == 'token_xent':
+        return M.Loss(L.ImageTokenLoss(**params),
+                output_transform=lambda output: output[0][-1])
     elif name == 'acc':
         return M.Accuracy(**params)
-    raise ValueError('Unrecognized metric {}.'.format(metric))
+    elif name == 'hunloss':
+        return M.Loss(L.HungarianLoss())
+    raise ValueError('Unrecognized metric {}.'.format(name))
 
 
 ################################ optimizers ###################################
 
+def param_group_idx(group_prefixes, param_name):
+    for i, prefix in enumerate(group_prefixes):
+        if prefix in param_name:
+            return i
+    return -1
+
+
 @training.capture
-def init_optimizer(optimizer, params, lr=0.01, l2_norm=0.0, **kwargs):
+def init_optimizer(optimizer, model, lr=0.01, l2_norm=0.0,
+                   param_groups=None, **kwargs):
+    if param_groups is None:
+        params = model.parameters()
+    else:
+        group_prefix = [pg[0] for pg in param_groups]
+        params = [{'params': [], **pg[1]} for pg in param_groups]
+        other_params = []
+
+        for p_name, p in model.named_parameters():
+            idx = param_group_idx(group_prefix, p_name)
+            if idx == -1:
+                other_params.append(p)
+            else:
+                params[idx]['params'].append(p)
+
+        if len(other_params) > 0:
+            params.append({'params': other_params})
+
+        assert (len(list(model.parameters())) ==
+                sum(len(p['params']) for p in params))
+
+    # params = [{'params': model.patch_ae.parameters(), 'lr': 0.0003},
+    #           {'params': model.slot_attn.parameters()},
+    #           {'params': model.gpt_decoder.parameters()},
+    #           {'params': model.token2emb.parameters()},
+    #           {'params': model.slot_proj.parameters()},
+    #           {'params': model.emb2token.parameters()}]
 
     if optimizer == 'adam':
         optimizer = optim.Adam(params, lr=lr, weight_decay=l2_norm, **kwargs)
@@ -169,22 +243,29 @@ def init_optimizer(optimizer, params, lr=0.01, l2_norm=0.0, **kwargs):
 
 ################################ schedulers ###################################
 
-schedulers = {'plateau'     : training.capture(lr_scheduler.ReduceLROnPlateau),
-              'exponential' : training.capture(lr_scheduler.ExponentialLR),
-              'step'        : training.capture(lr_scheduler.StepLR),
-              'smooth_step' : training.capture(SmoothStepLR),
-              'warmup_decay': training.capture(WarmupAndDecay)}
+plateau_scheduler =  training.capture(lr_scheduler.ReduceLROnPlateau)
+schedulers = {'exponential' : training.capture(ExponentialLR),
+              'warmup'      : training.capture(WarmupLR)}
 
 
 @training.capture
 def init_lr_scheduler(optimizer, scheduler, warmup=False, start_value=0.0,
                       warmup_steps=10000, end_value=None):
-    if scheduler is None:
-        return None
+    if scheduler is not None:
+        scheduler = schedulers[scheduler](optimizer)
 
-    scheduler = LRScheduler(schedulers[scheduler](optimizer))
+    if warmup:
+        warmup = schedulers['warmup'](optimizer)
+        if scheduler is not None:
+            scheduler = lr_scheduler.ChainedScheduler([scheduler, warmup])
+        else:
+            scheduler = warmup
 
-    if warmup:  # for schedulers with no inbuilt warm-up phase
-        scheduler = create_lr_scheduler_with_warmup(scheduler, start_value,
-                                                    warmup_steps, end_value)
     return scheduler
+
+
+@training.capture
+def reduce_on_plateau(optimizer, reduce_on_plateau=False):
+    if not reduce_on_plateau:
+        return None
+    return plateau_scheduler(optimizer)

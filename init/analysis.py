@@ -123,15 +123,13 @@ def generate_recons(model, data, n_recons=10, loss='bce', **kwargs):
         model.eval()
         device = next(model.parameters()).device
 
-        recons = model(inputs.to(device=device))
+        recons = model.decoder(model.embed(inputs.to(device=device)))
         if isinstance(recons, tuple):
             recons = recons[0]
 
         if loss == 'bce':
             recons = recons.sigmoid()
         else:
-            if recons.min() < 0.5:
-                recons = recons / 2 + 0.5
             recons = recons.clamp(0, 1)
 
         recons = recons.cpu()
@@ -150,9 +148,6 @@ def plot_recons(data, no_recon_labels=False, axes=None):
         fig, axes = plt.subplots(2, batch_size, figsize=(2 * batch_size, 4))
     else:
         fig = None
-
-    if inputs.min() < 0.0:
-        inputs = inputs / 2 + 0.5
 
     images = np.stack([inputs.numpy(), recons.numpy()])
 
@@ -187,8 +182,16 @@ def compute_slot_masks(model, data, n_recons=10, **kwargs):
         model.eval()
         device = next(model.parameters()).device
 
-        z = model.embed(inputs.to(device=device))
-        masks = model.decoder.masks(z).cpu()
+        _, masks = model.embed(inputs.to(device=device))
+
+        masks = masks / masks.sum(dim=-1, keepdim=True)
+
+        H, W = inputs.shape[-2:]
+        Rh = Rw = int(masks.shape[1] ** 0.5)
+
+        masks = masks.unflatten(1, (Rh, Rw))
+        masks = torch.repeat_interleave(masks, H // Rh, dim=-3)
+        masks = torch.repeat_interleave(masks, W // Rw, dim=-2)
 
     return inputs, masks, targets
 
@@ -205,8 +208,7 @@ def colorize(masks):
 
     for i, h in zip(range(n_slots), hue_rotations):
         for j in range(batch_size):
-            m = masks[i, j] > 1 / n_slots
-            masks[i, j] = m * tint(masks[i, j], h)
+            masks[i, j] = tint(masks[i, j], h)
 
     return masks
 
@@ -215,16 +217,14 @@ def colorize(masks):
 def plot_masks(data, no_recon_labels=False, axes=None):
     inputs, masks = data
 
-    batch_size, n_slots = masks.shape[:2]
-    img_shape = masks.shape[3:]
+    batch_size, n_slots = masks.shape[0], masks.shape[-1]
+    img_shape = inputs.shape[-2:]
 
     inputs = inputs.unsqueeze_(0).permute(0, 1, 3, 4, 2).cpu().numpy()
-    masks = masks.permute(1, 0, 3, 4, 2).cpu()
-    masks = masks.repeat(1, 1, 1, 1, 3).numpy()
+    masks = masks.cpu().unsqueeze_(-1).repeat(1, 1, 1, 1, 3)
+    masks = masks.permute(3, 0, 1, 2, 4).numpy()
 
     masks = colorize(masks)
-    if inputs.min() < 0.0:
-        inputs = inputs / 2 + 0.5
 
     images = np.concatenate([inputs, masks])
     labels = ['original'] + ['slot {}'.format(str(i+1)) for i in range(n_slots)]

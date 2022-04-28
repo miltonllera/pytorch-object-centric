@@ -7,8 +7,7 @@ Taken from:
 
 
 import torch
-import torch.nn as nn
-import torch.nn.init as init
+from torch import nn
 
 
 def get_activation_name(activation):
@@ -28,7 +27,21 @@ def get_activation_name(activation):
     raise ValueError("Unkown given activation type : {}".format(activation))
 
 
-def linear_init(layer, activation="relu"):
+def get_gain(activation):
+    """Given an object of `torch.nn.modules.activation` or an activation name
+    return the correct gain."""
+    if activation is None:
+        return 1
+
+    activation_name = get_activation_name(activation)
+
+    param = None if activation_name != "leaky_relu" else activation.negative_slope
+    gain = nn.init.calculate_gain(activation_name, param)
+
+    return gain
+
+
+def linear_init(layer, activation="relu", gain=1.0):
     """Initialize a linear layer.
     Args:
         layer (nn.Linear): parameters to initialize.
@@ -38,7 +51,7 @@ def linear_init(layer, activation="relu"):
     x = layer.weight
 
     if activation is None:
-        return nn.init.xavier_uniform_(x)
+        return nn.init.xavier_uniform_(x, gain=gain)
 
     activation_name = get_activation_name(activation)
 
@@ -48,15 +61,15 @@ def linear_init(layer, activation="relu"):
     elif activation_name == "relu":
         return nn.init.kaiming_uniform_(x, nonlinearity='relu')
     elif activation_name in ["sigmoid", "tanh"]:
-        return nn.init.xavier_uniform_(x, gain=init.calculate_gain(activation))
+        return nn.init.xavier_uniform_(x, gain=get_gain(activation))
 
 
-def weights_init(module):
+def weights_init(module, conv_activation='relu', linear_activation='relu'):
     if isinstance(module, torch.nn.modules.conv._ConvNd):
         # TO-DO: check litterature
-        linear_init(module)
+        linear_init(module, activation=conv_activation)
     elif isinstance(module, nn.Linear):
-        linear_init(module)
+        linear_init(module, activation='linear_activation')
 
 
 def xavier_normal_init_(m):
@@ -68,7 +81,7 @@ def xavier_normal_init_(m):
             pass
 
 
-def kaiming_normal_init_(m):
+def kaiming_normal_init_(m, a, nonlinearity):
     if type(m) == nn.Linear:
         torch.nn.init.kaiming_normal_(m.weight)
         try:
@@ -77,10 +90,12 @@ def kaiming_normal_init_(m):
             pass
 
 
-def gru_init(gru, bias=True):
+def gru_init(gru):
     nn.init.xavier_uniform_(gru.weight_ih)
     nn.init.orthogonal_(gru.weight_hh)
 
-    if bias:
+    try:
         nn.init.zeros_(gru.bias_ih)
         nn.init.zeros_(gru.bias_hh)
+    except AttributeError:
+        pass

@@ -14,7 +14,7 @@ Alt name is used to resolve conflcits between metrics with the same parameters^*
 
 ################################ Reconstruction ################################
 
-def discovery():
+def slot_ae():
     """
     Training for object discovery
     """
@@ -22,14 +22,35 @@ def discovery():
     batch_size = 64
     optimizer  = 'adam'
     lr         = 0.0004
-    l2_norm    = 0.0
+
+
+def dvae():
+    """
+    Training for dVAE
+    """
+    n_iters    = 300000
+    batch_size = 50
+    optimizer  = 'adam'
+    lr         = 0.0003
+
+
+def slate():
+    """
+    Training for slate
+    """
+    n_iters      = 500000
+    batch_size   = 50
+    optimizer    = 'adam'
+    lr           = 0.0001
+    # Use same names as in SLATE module for the parameter groups
+    param_groups = [('patch_ae', {'lr': 0.0003})]
 
 
 ################################### Predictors #################################
 
 def prediction():
     """
-    Training settings for classifiers
+    Training settings for property prediction
     """
     n_iters         = 40000
     batch_size      = 64
@@ -40,28 +61,18 @@ def prediction():
 
 ################################### Schedulers #################################
 
+def reduce_lr_on_plateau():
+    reduce_on_plateau = True
+    factor    = 0.5
+    patience  = 4
+
 def exponential_lr():
-    scheduler = 'exponential'
-    gamma     = 0.5
-
-def step_lr():
-    scheduler = 'step'
-    gamma     = 0.5
-    step_size = 5
-
-def smooth_step_lr():
-    scheduler = 'smooth_step'
-    gamma     = 0.5
-    n_steps   = 100000
+    scheduler    = 'exponential'
+    gamma        = 0.5 ** (1/100000)  # number of steps until lr is halved
+    decay_groups = [1]
 
 def warmup():
-    warmup      = True
-    start_value = 0.
-    duration    = 10000
-    end_value   = None  # Will default to optimizer learning rate
-
-def warmup_decay():
-    scheduler    = 'warmup_decay'
-    gamma        = 0.5
-    decay_steps  = 100000
-    warmup_steps = 10000
+    warmup        = True
+    start_value   = 0.0
+    warmup_steps  = 30000
+    warmup_groups = [1]  # warmup main params (slot, gpt-decoder & embedding)

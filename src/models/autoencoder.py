@@ -23,14 +23,19 @@ class AutoEncoder(nn.Module):
         return self.latent.size
 
     def embed(self, inputs):
-        """Embed a batch of data points, x, into their z representations."""
         return self.latent(self.encoder(inputs))
 
     def forward(self, inputs):
-        """
-        Takes a batch of samples, encodes them, and then decodes them again.
-        """
-        h = self.encoder(inputs)
-        z = self.latent(h)
-        recons = self.decoder(z).reshape(*inputs.shape)
+        z = self.embed(inputs)
+        recons = self.decoder(z)
+        return recons, z
+
+
+class VariationalAutoEncoder(AutoEncoder):
+    def embed(self, inputs):
+        return self.latent(self.encoder(inputs))[0]  # only return embedding
+
+    def forward(self, inputs):
+        z = self.latent(self.encoder(inputs))
+        recons = self.decoder(z[0])  # only use the embedding z
         return recons, z

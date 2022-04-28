@@ -14,6 +14,9 @@ import sys
 from dataclasses import dataclass
 from functools import partial
 
+import torch
+import torch.nn.functional as F
+import torchvision.transforms as trans
 import matplotlib.pyplot as plt
 from torch.utils.data.dataset import Dataset, Subset as BaseSubset
 from sacred import Ingredient
@@ -34,7 +37,6 @@ load_tetrominoes = dataset.capture(load_tetrominoes)
 # Wrappers
 supervised = dataset.capture(data_wrappers.Supervised)
 unsupervised = dataset.capture(data_wrappers.Unsupervised)
-reconstruction = dataset.capture(data_wrappers.Reconstruction)
 
 # Dataset configs
 dataset.add_named_config('shapes3d', dataset='shapes3d')
@@ -49,7 +51,6 @@ loaders  = {'shapes3d'      : load_shapes3d,
             'tetrominoes'   : load_tetrominoes}
 
 wrappers = {'supervised'    : supervised,
-            'reconstruction': reconstruction,
             'unsupervised'  : unsupervised}
 
 splits   = {'shapes3d'      : splits.Shapes3D,
@@ -144,9 +145,6 @@ class DatasetLazyLoader:
     def get_supervised(self, train=True, **kwargs):
         return self.get_subset(data_wrappers.Supervised(
             self.dataset, **kwargs), train)
-
-    def get_reconstruction(self, train=True):
-        return self.get_subset(data_wrappers.Reconstruction(self.dataset), train)
 
     def get_subset(self, dataset, train=True):
         mask = self.partition_masks[~train]

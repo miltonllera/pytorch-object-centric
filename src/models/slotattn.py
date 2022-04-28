@@ -3,24 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.parameter import Parameter
-from typing import Tuple, Union, get_type_hints
+from typing import Tuple, get_type_hints
 from .initialization import linear_init, gru_init
+from .autoencoder import AutoEncoder
 
 
 class SlotAttention(nn.Module):
-    def __init__(self, input_size: tuple, n_slots: int = 4, slot_size: int = 64,
-            n_iter: int = 3, hidden_size: int = 128, epsilon: float = 1e-8):
+    def __init__(self, input_size: int, n_slots: int = 4, slot_size: int = 64,
+            n_iter: int = 3, slot_channels=1, hidden_size: int = 128,
+            approx_implicit_grad: bool = True, epsilon: float = 1e-8):
         super().__init__()
 
         assert n_slots > 1, "Must have at least two slots"
         assert n_iter > 0, "Need at least one slot update iteration"
-
-        _, input_size = input_size
+        assert (slot_size % slot_channels) == 0
 
         self.n_slots = n_slots
         self.slot_size = slot_size
         self.n_iter = n_iter
+        self.nhead = slot_channels
         self.EPS = epsilon
+        self.approx_implicit_grad = approx_implicit_grad
 
         # slot init
         self.slot_mu = Parameter(torch.empty(1, 1, slot_size))
@@ -59,44 +62,57 @@ class SlotAttention(nn.Module):
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.slot_mu)
         nn.init.xavier_uniform_(self.slot_logvar)
+
         linear_init(self.k_proj, activation='relu')
         linear_init(self.v_proj, activation='relu')
         linear_init(self.q_proj, activation='relu')
-        gru_init(self.gru, bias=True)
 
-        for m in self.children():
-            try:
-                m.reset_parameters()
-            except AttributeError:
-                pass
+        for m in self.mlp.children():
+            if isinstance(m, nn.Linear):
+                linear_init(m, activation='relu')
 
-    def forward(self, inputs: Tensor) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+        gru_init(self.gru)
+
+    def forward(self, inputs: Tensor) -> Tuple[Tensor, Tensor]:
         slots = self.init_slots(inputs)  # batch_size, n_slots, slot_size
         inputs = self.norm_input(inputs)  # batch_size, n_inputs, input_size
 
-        # keys and values, shape (batch_size, n_inputs, slot_size)
-        k = self.k_proj(inputs) / (self.slot_size ** 0.5)
-        v = self.v_proj(inputs)
+        # shape (batch_size, n_heads, n_inputs, slot_size // nheads)
+        k = self.split_heads(self.k_proj(inputs))
+        v = self.split_heads(self.v_proj(inputs))
+
+        k = k / ((self.slot_size / self.nhead) ** 0.5)
 
         for _ in range(self.n_iter):
-            slots, atten_weights = self.step(slots, k, v)
+            slots, atten_masks = self.step(slots, k, v)
 
-        # First-order Neumann approximation to implicit gradient (Cheng et al)
-        slots, atten_weights = self.step(slots.detach(), k, v)
+        # First-order Neumann approximation to implicit gradient (Chang et al)
+        if self.approx_implicit_grad:
+            slots, atten_masks = self.step(slots.detach(), k, v)
 
-        return slots, atten_weights
+        # slots are in the correct shape
+        return slots, atten_masks.sum(dim=1)  # add weights from attention heads
+
+    def split_heads(self, input):
+        # input size: B, n_in, slot_size/input_size
+        split_size = input.shape[-1] // self.nhead
+        return input.unflatten(-1, (self.nhead, split_size)).transpose(1, 2)
+
+    def join_heads(self, input):
+        # input size: B, n_head, n_in, slot_size/input_size // n_head
+        return input.transpose(1, 2).flatten(start_dim=2)
 
     def init_slots(self, inputs):
         std = self.slot_logvar.mul(0.5).exp()
         std = std.expand(len(inputs), self.n_slots, -1)
         eps = torch.randn_like(std)
-        return self.slot_mu.addcmul(std, eps).to(device=inputs.device)
+        return self.slot_mu.addcmul(std, eps)
 
     def step(self, slots, k, v):
-        norm_slots = self.norm_slot(slots)
-        q = self.q_proj(norm_slots)
+        q = self.q_proj(self.norm_slot(slots))
 
-        # both of shape (batch_sizs, n_slots, slot_size)
+        # atten_maps: (batch_sizs, n_slots, slot_size)
+        # atten_weights: (batch_size, n_heads, n_slots, slot_size // n_heads)
         atten_maps, atten_weights = self.compute_attention_maps(k, q, v)
 
         slots = self.update_slots(atten_maps, slots)
@@ -104,15 +120,17 @@ class SlotAttention(nn.Module):
         return slots, atten_weights
 
     def compute_attention_maps(self, k, q, v):
+        q = self.split_heads(q)
+
         # slots compete for input patches
-        weights = k.matmul(q.transpose(1, 2))  # n_inputs, n_slots
-        weights = F.softmax(weights, dim=-1)
+        weights = k.matmul(q.transpose(2, 3))  # n_inputs, n_slots
+        weights = F.softmax(self.join_heads(weights), dim=-1)
 
         # weighted mean over n_inputs
-        weights = weights + self.EPS
+        weights = self.split_heads(weights) + self.EPS
         weights = weights / weights.sum(dim=-2, keepdim=True)
 
-        atten_maps = weights.transpose(1, 2).matmul(v)
+        atten_maps = self.join_heads(weights.transpose(2, 3).matmul(v))
 
         return atten_maps, weights
 
@@ -127,9 +145,7 @@ class SlotAttention(nn.Module):
         slots = self.gru(atten_maps, slots)
         slots = slots + self.mlp(self.norm_res(slots))
 
-        slots = slots.unflatten(0, (B, self.n_slots))
-
-        return slots
+        return slots.unflatten(0, (B, self.n_slots))
 
     def __repr__(self):
         return 'SlotAttention(n_slots={}, slot_size={}, n_iter={})'.format(
@@ -141,7 +157,7 @@ class SlotDecoder(nn.Sequential):
         types = get_type_hints(self[0].forward)
         return types['inputs'] == torch.Tensor
 
-    def decode_slots(self, inputs: Tensor) -> Tuple[Tensor, Tensor]:
+    def decode_slots(self, inputs):
         slots, atten_weights = inputs
         batch_size, n_slots = slots.size()[:2]
 
@@ -162,9 +178,6 @@ class SlotDecoder(nn.Sequential):
 
         return slot_recons, slot_masks
 
-    def forward(self, inputs: Tensor) -> Tensor:
+    def forward(self, inputs: Tuple[Tensor, Tensor]) -> Tensor:
         slot_recons, slot_masks = self.decode_slots(inputs)
         return (slot_masks * slot_recons).sum(dim=1)
-
-    def masks(self, inputs: Tensor) -> Tensor:
-        return self.decode_slots(inputs)[1]
